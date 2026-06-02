@@ -95,7 +95,9 @@ impl Game {
         }
     }
 
-    fn draw<W: Write>(&self, stdout: &mut W) -> std::ioResult<()> {
+    
+    // Change std::ioResult to std::io::Result
+    fn draw<W: Write>(&self, stdout: &mut W) -> std::io::Result<()> {
         // Clear screen using a single high-performance sweep
         stdout.queue(crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
 
@@ -135,8 +137,7 @@ impl Game {
         Ok(())
     }
 }
-
-fn main() -> std::ioResult<()> {
+fn main() -> std::io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, Hide)?;

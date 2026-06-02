@@ -78,7 +78,7 @@ jobs:
       - name: Run Cross-Compilation & Upload to Release
         uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: terminal_pong
+          bin: PingPong
           target: ${{ matrix.target }}
           ref: refs/tags/${{ needs.create-release.outputs.version }}
           token: ${{ secrets.GITHUB_TOKEN }}
