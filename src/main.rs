@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 const PADDLE_HEIGHT: i16 = 4;
 const FPS: u64 = 60;
 const FRAME_TIME: Duration = Duration::from_millis(1000 / FPS);
+const WIN_SCORE: u32 = 7;
 
 struct Ball {
     x: f32,
@@ -23,14 +24,26 @@ struct Game {
     width: u16,
     height: u16,
     ball: Ball,
-    paddle_a: i16, // Left paddle Y center
-    paddle_b: i16, // Right paddle Y center
+    paddle_a: f32, // Left paddle Y center (now f32 for smooth AI)
+    paddle_b: f32, // Right paddle Y center
     score_a: u32,
     score_b: u32,
+    fps: u32,                     // Current frames per second
+    game_over: bool,
+    winner: Option<String>,
+    // AI state
+    cpu_target_y: f32,
+    cpu_last_update: Instant,
+    rng: u64,                     // Simple PRNG state
 }
 
 impl Game {
     fn new(width: u16, height: u16) -> Self {
+        // Seed RNG with system time for variety
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
         Self {
             width,
             height,
@@ -40,11 +53,23 @@ impl Game {
                 dx: 0.5,
                 dy: 0.2,
             },
-            paddle_a: (height / 2) as i16,
-            paddle_b: (height / 2) as i16,
+            paddle_a: (height / 2) as f32,
+            paddle_b: (height / 2) as f32,
             score_a: 0,
             score_b: 0,
+            fps: 0,
+            game_over: false,
+            winner: None,
+            cpu_target_y: (height / 2) as f32,
+            cpu_last_update: Instant::now(),
+            rng: seed,
         }
+    }
+
+    fn random_f(&mut self) -> f32 {
+        // Fast PCG-like generator
+        self.rng = self.rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (self.rng as f64 / u64::MAX as f64) as f32
     }
 
     fn reset_ball(&mut self, direction: f32) {
@@ -55,88 +80,126 @@ impl Game {
     }
 
     fn update(&mut self) {
-        // Update ball position
+        // Move ball
         self.ball.x += self.ball.dx;
         self.ball.y += self.ball.dy;
 
-        // Ceiling and floor collisions
+        // Ceiling and floor
         if self.ball.y <= 1.0 || self.ball.y >= (self.height - 1) as f32 {
             self.ball.dy = -self.ball.dy;
         }
 
-        // Left Paddle Collision Mechanics
+        // Left paddle collision
         if self.ball.x <= 3.0 && self.ball.x >= 2.0 {
-            let paddle_top = self.paddle_a - PADDLE_HEIGHT / 2;
-            let paddle_bottom = self.paddle_a + PADDLE_HEIGHT / 2;
-            if self.ball.y >= paddle_top as f32 && self.ball.y <= paddle_bottom as f32 {
-                self.ball.dx = -self.ball.dx * 1.05; // Slightly speed up on hit
-                // Alter angle based on where it hit the paddle
-                self.ball.dy += (self.ball.y - self.paddle_a as f32) * 0.1;
-            }
-        }
-
-        // Right Paddle Collision Mechanics
-        if self.ball.x >= (self.width - 3) as f32 && self.ball.x <= (self.width - 2) as f32 {
-            let paddle_top = self.paddle_b - PADDLE_HEIGHT / 2;
-            let paddle_bottom = self.paddle_b + PADDLE_HEIGHT / 2;
+            let paddle_top = self.paddle_a as i16 - PADDLE_HEIGHT / 2;
+            let paddle_bottom = self.paddle_a as i16 + PADDLE_HEIGHT / 2;
             if self.ball.y >= paddle_top as f32 && self.ball.y <= paddle_bottom as f32 {
                 self.ball.dx = -self.ball.dx * 1.05;
-                self.ball.dy += (self.ball.y - self.paddle_b as f32) * 0.1;
+                self.ball.dy += (self.ball.y - self.paddle_a) * 0.1;
             }
         }
 
-        // Score tracking
+        // Right paddle collision
+        if self.ball.x >= (self.width - 3) as f32 && self.ball.x <= (self.width - 2) as f32 {
+            let paddle_top = self.paddle_b as i16 - PADDLE_HEIGHT / 2;
+            let paddle_bottom = self.paddle_b as i16 + PADDLE_HEIGHT / 2;
+            if self.ball.y >= paddle_top as f32 && self.ball.y <= paddle_bottom as f32 {
+                self.ball.dx = -self.ball.dx * 1.05;
+                self.ball.dy += (self.ball.y - self.paddle_b) * 0.1;
+            }
+        }
+
+        // Scoring & win condition
         if self.ball.x <= 0.0 {
             self.score_b += 1;
+            if self.score_b >= WIN_SCORE {
+                self.game_over = true;
+                self.winner = Some("CPU".to_string());
+            }
             self.reset_ball(1.0);
         } else if self.ball.x >= self.width as f32 {
             self.score_a += 1;
+            if self.score_a >= WIN_SCORE {
+                self.game_over = true;
+                self.winner = Some("Player".to_string());
+            }
             self.reset_ball(-1.0);
         }
+
+        // --- CPU opponent (right paddle) ---
+        // Update target every ~0.4s with a random offset to feel human
+        if self.cpu_last_update.elapsed() > Duration::from_millis(400) {
+            let offset = (self.random_f() * 6.0) - 3.0; // -3..3
+            self.cpu_target_y = (self.ball.y + offset)
+                .clamp(PADDLE_HEIGHT as f32 / 2.0, self.height as f32 - PADDLE_HEIGHT as f32 / 2.0);
+            self.cpu_last_update = Instant::now();
+        }
+        // Move paddle towards target at a fixed speed (smooth, human-like)
+        let diff = self.cpu_target_y - self.paddle_b;
+        if diff.abs() < 0.5 {
+            self.paddle_b = self.cpu_target_y;
+        } else {
+            self.paddle_b += diff.signum() * 1.0; // move 1 unit per frame
+        }
+        self.paddle_b = self.paddle_b.clamp(
+            PADDLE_HEIGHT as f32 / 2.0,
+            self.height as f32 - PADDLE_HEIGHT as f32 / 2.0,
+        );
     }
 
-    
-    // Change std::ioResult to std::io::Result
     fn draw<W: Write>(&self, stdout: &mut W) -> std::io::Result<()> {
-        // Clear screen using a single high-performance sweep
+        // Clear screen (high-performance full clear)
         stdout.queue(crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
 
-        // Render Scores
-        stdout.queue(crossterm::cursor::MoveTo(self.width / 4, 1))?;
-        print!("{}", self.score_a);
-        stdout.queue(crossterm::cursor::MoveTo((self.width * 3) / 4, 1))?;
-        print!("{}", self.score_b);
+        // 1. FPS box (top-left corner, fixed size)
+        let fps_text = format!("FPS: {}", self.fps);
+        stdout.queue(crossterm::cursor::MoveTo(0, 0))?;
+        write!(stdout, "┌──────────┐")?;
+        stdout.queue(crossterm::cursor::MoveTo(0, 1))?;
+        write!(stdout, "│ {: <8} │", fps_text)?;
+        stdout.queue(crossterm::cursor::MoveTo(0, 2))?;
+        write!(stdout, "└──────────┘")?;
 
-        // Render Center Line
+        // 2. Scores
+        stdout.queue(crossterm::cursor::MoveTo(self.width / 4, 1))?;
+        write!(stdout, "{}", self.score_a)?;
+        stdout.queue(crossterm::cursor::MoveTo((self.width * 3) / 4, 1))?;
+        write!(stdout, "{}", self.score_b)?;
+
+        // 3. Center line
         for y in 0..self.height {
             if y % 2 == 0 {
                 stdout.queue(crossterm::cursor::MoveTo(self.width / 2, y))?;
-                print!("|");
+                write!(stdout, "|")?;
             }
         }
 
-        // Render Left Paddle (Player A)
-        let a_start = (self.paddle_a - PADDLE_HEIGHT / 2).max(0);
+        // 4. Left paddle
+        let a_start = (self.paddle_a as i16 - PADDLE_HEIGHT / 2).max(0);
         for i in 0..PADDLE_HEIGHT {
             stdout.queue(crossterm::cursor::MoveTo(2, (a_start + i) as u16))?;
-            print!("█");
+            write!(stdout, "█")?;
         }
 
-        // Render Right Paddle (Player B)
-        let b_start = (self.paddle_b - PADDLE_HEIGHT / 2).max(0);
+        // 5. Right paddle
+        let b_start = (self.paddle_b as i16 - PADDLE_HEIGHT / 2).max(0);
         for i in 0..PADDLE_HEIGHT {
             stdout.queue(crossterm::cursor::MoveTo(self.width - 3, (b_start + i) as u16))?;
-            print!("█");
+            write!(stdout, "█")?;
         }
 
-        // Render Ball
-        stdout.queue(crossterm::cursor::MoveTo(self.ball.x as u16, self.ball.y as u16))?;
-        print!("●");
+        // 6. Ball
+        stdout.queue(crossterm::cursor::MoveTo(
+            self.ball.x as u16,
+            self.ball.y as u16,
+        ))?;
+        write!(stdout, "●")?;
 
         stdout.flush()?;
         Ok(())
     }
 }
+
 fn main() -> std::io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -146,6 +209,10 @@ fn main() -> std::io::Result<()> {
     let mut game = Game::new(width, height);
     let mut last_tick = Instant::now();
 
+    // FPS tracking
+    let mut frame_count = 0u32;
+    let mut fps_timer = Instant::now();
+
     'gameloop: loop {
         let timeout = FRAME_TIME
             .checked_sub(last_tick.elapsed())
@@ -153,20 +220,22 @@ fn main() -> std::io::Result<()> {
 
         if event::poll(timeout)? {
             if let Event::Key(key_event) = event::read()? {
-                // Handle exits cleanly
-                if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('c') {
+                if key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    && key_event.code == KeyCode::Char('c')
+                {
                     break 'gameloop;
                 }
 
                 match key_event.code {
-                    // Left Paddle Controls (W/S)
-                    KeyCode::Char('w') => game.paddle_a = (game.paddle_a - 2).max(PADDLE_HEIGHT / 2),
-                    KeyCode::Char('s') => game.paddle_a = (game.paddle_a + 2).min(game.height as i16 - PADDLE_HEIGHT / 2),
-                    
-                    // Right Paddle Controls (Up/Down Arrows)
-                    KeyCode::Up => game.paddle_b = (game.paddle_b - 2).max(PADDLE_HEIGHT / 2),
-                    KeyCode::Down => game.paddle_b = (game.paddle_b + 2).min(game.height as i16 - PADDLE_HEIGHT / 2),
-                    
+                    // Left paddle (Player) – now uses f32 for smooth movement
+                    KeyCode::Char('w') => {
+                        game.paddle_a = (game.paddle_a - 2.0)
+                            .max(PADDLE_HEIGHT as f32 / 2.0)
+                    }
+                    KeyCode::Char('s') => {
+                        game.paddle_a = (game.paddle_a + 2.0)
+                            .min(game.height as f32 - PADDLE_HEIGHT as f32 / 2.0)
+                    }
                     KeyCode::Esc => break 'gameloop,
                     _ => {}
                 }
@@ -177,10 +246,44 @@ fn main() -> std::io::Result<()> {
             game.update();
             game.draw(&mut stdout)?;
             last_tick = Instant::now();
+
+            // FPS counter update every second
+            frame_count += 1;
+            if fps_timer.elapsed() >= Duration::from_secs(1) {
+                game.fps = frame_count;
+                frame_count = 0;
+                fps_timer = Instant::now();
+            }
+
+            // Win condition – exit game loop
+            if game.game_over {
+                break 'gameloop;
+            }
         }
     }
 
-    // Clean cleanup to ensure the user's terminal isn't broken on exit
+    // If game ended, show winner and wait for keypress
+    if game.game_over {
+        // Clear screen and show message centered
+        execute!(
+            stdout,
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+            crossterm::cursor::MoveTo(width / 2 - 10, height / 2)
+        )?;
+        if let Some(winner) = &game.winner {
+            write!(stdout, "{} wins! Press any key to exit.", winner)?;
+        }
+        stdout.flush()?;
+
+        // Wait for any key
+        loop {
+            if event::poll(Duration::from_secs(1))? {
+                let _ = event::read()?;
+                break;
+            }
+        }
+    }
+
     execute!(stdout, LeaveAlternateScreen, Show)?;
     disable_raw_mode()?;
     Ok(())
