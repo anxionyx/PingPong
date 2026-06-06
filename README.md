@@ -1,5 +1,5 @@
 # PingPong
-##A Ping Pong game made with rust to relax in terminal
+## A Ping Pong game made with rust to relax in terminal
 > [!WARNING]
 > Repo NOT Maintained,archieved in June 2026
 ### Installation
